@@ -1,0 +1,5 @@
+# Documentation addresses only; replace before deployment.
+# exporter ifIndex stable-link-id display-name color legacy-sampling-ignored
+192.0.2.1 10 link-a "Link A" 336699 100
+192.0.2.2 20 link-b "Link B" 993366 125
+192.0.2.3 30 link-c "Link C" 669933 500

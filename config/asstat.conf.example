@@ -1,0 +1,46 @@
+# EXAMPLE ONLY: addresses and ports below are illustrative, not operational.
+# Adjust bind, exporters, knownlinks and output paths before use.
+netflow9_ports = 2055,2056,2057
+bind_address = 192.0.2.10
+exporters = {2055:192.0.2.1,2056:192.0.2.2,2057:192.0.2.3}
+samplerate = {192.0.2.1:100,192.0.2.2:125,192.0.2.3:500}
+exported_counters = {192.0.2.1:sampled,192.0.2.2:sampled,192.0.2.3:already_scaled}
+knownlinks_file = /etc/as-stat-be/knownlinks
+replace_asn = 64496
+private_asn_ranges = {64512,65534},{4200000000,4294967294}
+exclude_asn = 64496
+
+# Per-source receive limits and template TTL.
+template_ttl_seconds = 300
+queue_datagrams = 4096
+queue_memory_bytes = 8388608
+# Shared aggregation and output limits.
+close_delay_seconds = 5
+max_active_windows = 4
+max_active_keys = 100000
+writer_queue_records = 32768
+writer_queue_bytes = 16777216
+# New files only; existing files are never overwritten. Paths are relative to cwd.
+output = asstat-final.json
+windows_output = none
+duration = 0
+warmup = 15
+report_interval = 10
+
+# Enable only with a dedicated spool and a verified local VictoriaMetrics instance.
+delivery_enabled = true
+victoriametrics_url = http://127.0.0.1:8428
+spool_directory = /var/spool/asstat
+spool_max_bytes = 1073741824
+spool_max_files = 8192
+delivery_queue_records = 32768
+delivery_queue_bytes = 16777216
+delivery_batch_records = 512
+delivery_batch_bytes = 131072
+delivery_http_timeout_ms = 3000
+delivery_retry_initial_ms = 1000
+delivery_retry_max_ms = 60000
+delivery_shutdown_timeout_ms = 10000
+
+# Optional per-socket request; 0 preserves kernel default.
+socket_receive_buffer_bytes = 0

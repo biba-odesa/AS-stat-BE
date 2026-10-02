@@ -1,0 +1,23 @@
+[Unit]
+Description=AS-stat-BE NetFlow v9 collector and delivery
+After=network.target
+
+[Service]
+Type=simple
+User=asstat
+Group=asstat
+WorkingDirectory=/opt/as-stat-be
+ExecStart=/usr/bin/python3 /opt/as-stat-be/bin/asstat-run.py /opt/as-stat-be/bin/nf9-receiver /etc/as-stat-be/asstat.conf /var/lib/as-stat-be/reports
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=45
+UMask=0027
+NoNewPrivileges=true
+StandardOutput=journal
+StandardError=journal
+LogRateLimitIntervalSec=60
+LogRateLimitBurst=30
+
+[Install]
+WantedBy=multi-user.target
