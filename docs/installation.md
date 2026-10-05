@@ -41,6 +41,10 @@ Health is the ready/periodic JSON in journal and final JSON in the unique report
 
 For an update, build and test the new revision separately, stop only as-stat-be.service, install receiver and mandatory worker together, preserve /etc/as-stat-be and /var/spool/asstat, then start. Existing reports cannot cause O_EXCL restart failure: launcher chooses a new directory every time. Do not start a second sender on the same spool.
 
+## Optional UDP receive-buffer tuning
+
+The default setup does not require changing sysctl. `socket_receive_buffer_bytes` is a per-listener SO_RCVBUF request, subject to net.core.rmem_max; Linux reports a doubled accounting limit. Use the read-only sysctl/ss checks and conditional tuning guidance in [configuration](configuration.md#udp-receive-buffer). Larger buffers help with brief bursts, not sustained overload. The checks use procps (`sysctl`) and iproute2 (`ss`); if absent on a minimal Debian installation, those packages provide the inspection tools. Keep socket drops separate from application queue drops and unknown templates.
+
 ## VictoriaMetrics OSS single-node
 
 Official references: [single-node documentation](https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/) and [official releases](https://github.com/VictoriaMetrics/VictoriaMetrics/releases). Choose an explicit OSS release and architecture; do not download an enterprise or cluster archive. Match linux-amd64 to x86_64, linux-arm64 to aarch64. Check the selected release's actual asset names and published checksum before running these template commands.
