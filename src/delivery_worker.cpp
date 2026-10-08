@@ -60,6 +60,7 @@ class Spool {
     }
 public:
     explicit Spool(DeliveryConfig c):c_(std::move(c)) {
+        stats_.retention_seconds=c_.retention_seconds;
         const auto resolved=std::filesystem::canonical(c_.directory).string();
         if(resolved=="/var/lib/victoriametrics"||resolved.starts_with("/var/lib/victoriametrics/"))throw std::runtime_error("VM storage cannot be spool");
         dir_=open(c_.directory.c_str(),O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
@@ -72,7 +73,9 @@ public:
             while(auto* e=readdir(listing)) {
                 std::string name=e->d_name;if(name=="."||name==".."||name==".lock")continue;
                 if(batches_.size()>=c_.spool_files)throw std::runtime_error("Existing spool exceeds file limit; preserve and inspect it");
-                struct stat st{};if(fstatat(dir_,name.c_str(),&st,AT_SYMLINK_NOFOLLOW)||!S_ISREG(st.st_mode)||st.st_uid!=getuid()||st.st_nlink!=1)throw std::runtime_error("Unexpected spool entry");
+                struct stat st{};if(fstatat(dir_,name.c_str(),&st,AT_SYMLINK_NOFOLLOW))throw std::runtime_error("Cannot inspect spool entry");
+                if(S_ISDIR(st.st_mode)&&st.st_uid==getuid()&&!(st.st_mode&0022)&&std::find(c_.permitted_child_directories.begin(),c_.permitted_child_directories.end(),name)!=c_.permitted_child_directories.end())continue;
+                if(!S_ISREG(st.st_mode)||st.st_uid!=getuid()||st.st_nlink!=1)throw std::runtime_error("Unexpected spool entry");
                 Batch b;b.name=name;b.size=static_cast<uint64_t>(st.st_size);
                 if(b.size>UINT64_MAX-stats_.pending_bytes)throw std::runtime_error("Spool size overflow");
                 stats_.pending_bytes+=b.size;
@@ -121,7 +124,7 @@ public:
         const auto now=monotonic_ns()/1000000,wall=realtime_ns()/1000000000;
         for(size_t i=0,n=batches_.size();i<n;++i) {
             Batch b=std::move(batches_.front());batches_.pop_front();
-            if(!b.blocked&&wall>604800&&b.first<wall-604800){b.blocked=true;++stats_.expired_batches;}
+            if(!b.blocked&&wall>c_.retention_seconds&&b.first<wall-c_.retention_seconds){b.blocked=true;++stats_.expired_batches;}
             if(b.blocked||b.due>now){batches_.push_back(std::move(b));continue;}
             std::string body;
             try {body=read(b);}catch(...){b.blocked=true;++stats_.corrupt_files;batches_.push_back(std::move(b));continue;}
@@ -165,10 +168,15 @@ uint64_t integer(const char* v){uint64_t n=0;auto len=strlen(v);auto [p,e]=std::
 }
 int delivery_worker(int argc,char** argv) {
     try {
-        if(argc!=9)throw std::runtime_error("Internal delivery worker arguments required");
+        if(argc!=9&&argc!=10&&argc!=11)throw std::runtime_error("Internal delivery worker arguments required");
         if(prctl(PR_SET_PDEATHSIG,SIGKILL)||getppid()==1)throw std::runtime_error("Delivery parent absent");
         DeliveryConfig c;c.directory=argv[1];c.url=argv[2];c.spool_bytes=integer(argv[3]);c.spool_files=integer(argv[4]);
         c.batch_bytes=integer(argv[5]);c.http_timeout_ms=integer(argv[6]);c.retry_initial_ms=integer(argv[7]);c.retry_max_ms=integer(argv[8]);
+        if(argc>=10)c.retention_seconds=integer(argv[9]);
+        if(argc==11){std::istringstream input(argv[10]);std::string name;while(std::getline(input,name,',')){
+            if(name.empty()||name.size()>32||name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")!=std::string::npos)throw std::runtime_error("Invalid permitted child directory");
+            c.permitted_child_directories.push_back(name);
+        }}
         if(c.batch_bytes>delivery_payload_limit||c.spool_files>65536)throw std::runtime_error("Worker limits invalid");
         Spool spool(c);auto reply=spool.stats();if(send(3,&reply,sizeof(reply),MSG_NOSIGNAL)!=sizeof(reply))return 1;
         std::array<char,delivery_payload_limit+sizeof(DeliveryRequest)> packet{};

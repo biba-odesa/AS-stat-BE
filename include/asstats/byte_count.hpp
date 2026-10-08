@@ -8,6 +8,15 @@ __extension__ typedef unsigned __int128 UInt128;
 class ByteCount {
 public:
     explicit ByteCount(uint64_t n=0):value_(n) {}
+    static ByteCount decimal(const std::string& text) {
+        if(text.empty()) throw std::invalid_argument("Empty byte count");
+        ByteCount n;
+        for(char c:text) {
+            if(c<'0'||c>'9') throw std::invalid_argument("Invalid decimal byte count");
+            n=n.multiplied(10);n.add(ByteCount(static_cast<uint64_t>(c-'0')));
+        }
+        return n;
+    }
     static ByteCount maximum() {ByteCount n;n.value_=~UInt128(0);return n;}
     ByteCount multiplied(uint64_t factor) const {
         if(factor&&value_>~UInt128(0)/factor) throw std::overflow_error("128-bit byte multiplication overflow");

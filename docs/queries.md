@@ -1,6 +1,6 @@
-# Minute queries
+# Archive queries
 
-Metric: asstat_traffic_bytes, complete-minute byte volume with minute-start timestamps. A window at A represents [A,A+60s), not an observation of a cumulative counter. Sampling/ASN policy is already applied; do not multiply again.
+Metric: asstat_traffic_bytes, complete-interval byte volume with UTC interval-start timestamps. For the minute endpoint a window at A represents [A,A+60s), not an observation of a cumulative counter. Sampling/ASN policy is already applied; do not multiply again.
 
 Use actual raw points as the reference, via /api/v1/export with match[]=asstat_traffic_bytes and explicit start/end. Do not use reduce_mem_usage=1: it disables deduplication of recent export data. Export end is inclusive; for [A,B) use B-0.001 seconds. Chunk large exports rather than requesting all history.
 
@@ -37,3 +37,6 @@ sum_over_time(asstat_traffic_bytes{asn="64496",direction="in",ip_version="4"}[1m
 ```
 
 Do not use rate()/increase() on this gauge. Do not sum filled graphical points to calculate volume. Only full closed minutes are stored: no implicit zero series and no partial-minute normalization. These window formulations were checked against independent calculations during the project's local validation; no operational datasets are published.
+
+
+For another archive, query its own endpoint and use interval-aligned timestamps and step equal to interval_seconds. Average bit/s is bytes * 8 / interval_seconds (300, 1800 or 7200 in the example), not always /60. Keep the 1ms exact-point window when selecting actual interval starts. Top-10 totals sum original interval points; require period boundaries aligned to the chosen archive interval. A coarse point cannot be split accurately across arbitrary sub-intervals. Known partial/gap windows are absent, never filled with the previous volume. Do not combine archive endpoints to count traffic twice. Ordinary graphical selectors remain unsuitable as an independent volume reference.

@@ -44,3 +44,37 @@ delivery_shutdown_timeout_ms = 10000
 
 # Optional per-socket request; 0 preserves kernel default.
 socket_receive_buffer_bytes = 0
+
+# Independent interval archives; initialize state explicitly before first startup.
+# Total budgets are divided between configured archives; state reserves one share for migration reference.
+archive_state_directory = /var/lib/as-stat-be/archives
+archive_state_max_bytes = 2147483648
+archive_queue_bytes = 67108864
+archive_queue_minutes = 8
+archive_max_keys = 1000000
+archive_outbox_rows = 1000000
+
+[archive minute]
+url = http://127.0.0.1:8428
+interval_seconds = 60
+retention_days = 1
+
+[archive week]
+url = http://127.0.0.1:8429
+interval_seconds = 300
+retention_days = 7
+
+[archive month]
+url = http://127.0.0.1:8430
+interval_seconds = 1800
+retention_days = 31
+
+[archive year]
+url = http://127.0.0.1:8431
+interval_seconds = 7200
+retention_days = 370
+
+# [archive four_years]
+# url = http://127.0.0.1:8432
+# interval_seconds = 14400
+# retention_days = 1461

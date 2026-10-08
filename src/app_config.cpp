@@ -45,17 +45,34 @@ std::map<std::string,std::string> mapping(const std::string& s) {
 }
 AppConfig read_app_config(std::istream& input) {
     AppConfig c;std::map<std::string,std::pair<std::string,size_t>> values;
+    using Parameters=std::map<std::string,std::pair<std::string,size_t>>;
+    std::vector<std::pair<ArchiveConfig,Parameters>> sections;
+    std::set<std::string> names;
     std::string line;size_t ln=0,at=0;
     try {
         while(std::getline(input,line)){
             at=++ln;if(ln>1024||line.size()>4096)throw std::runtime_error("Configuration too large");
             line=trim(line);if(line.empty()||line.front()=='#')continue;
+            if(line.front()=='[') {
+                if(line.back()!=']')throw std::runtime_error("Incomplete archive section header");
+                auto header=trim(line.substr(1,line.size()-2));
+                if(!header.starts_with("archive "))throw std::runtime_error("Expected [archive NAME]");
+                auto name=trim(header.substr(8));
+                if(name.empty()||name.size()>32||name.front()=='-'||name.front()=='_'||
+                   name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")!=std::string::npos)
+                    throw std::runtime_error("Archive name must be 1..32 safe alphanumeric, underscore or hyphen characters, starting alphanumeric");
+                if(!names.insert(name).second)throw std::runtime_error("Repeated archive section: "+name);
+                if(sections.size()>=16)throw std::runtime_error("At most 16 archives are supported");
+                ArchiveConfig archive;archive.name=name;archive.line=ln;
+                sections.emplace_back(std::move(archive),Parameters{});continue;
+            }
             auto eq=line.find('=');if(eq==std::string::npos)throw std::runtime_error("Expected key = value");
             auto key=trim(line.substr(0,eq)),value=trim(line.substr(eq+1));
-            if(!values.emplace(key,std::make_pair(value,ln)).second)throw std::runtime_error("Repeated parameter: "+key);
+            auto& target=sections.empty()?values:sections.back().second;
+            if(!target.emplace(key,std::make_pair(value,ln)).second)throw std::runtime_error("Repeated parameter: "+key);
         }
         if(input.bad())throw std::runtime_error("Configuration read failed");
-        const std::set<std::string> allowed={"netflow9_ports","bind_address","exporters","samplerate","exported_counters","knownlinks_file","replace_asn","private_asn_ranges","exclude_asn","template_ttl_seconds","queue_datagrams","queue_memory_bytes","socket_receive_buffer_bytes","close_delay_seconds","max_active_windows","max_active_keys","writer_queue_records","writer_queue_bytes","output","windows_output","duration","warmup","report_interval","delivery_enabled","victoriametrics_url","spool_directory","spool_max_bytes","spool_max_files","delivery_queue_records","delivery_queue_bytes","delivery_batch_records","delivery_batch_bytes","delivery_http_timeout_ms","delivery_retry_initial_ms","delivery_retry_max_ms","delivery_shutdown_timeout_ms"};
+        const std::set<std::string> allowed={"netflow9_ports","bind_address","exporters","samplerate","exported_counters","knownlinks_file","replace_asn","private_asn_ranges","exclude_asn","template_ttl_seconds","queue_datagrams","queue_memory_bytes","socket_receive_buffer_bytes","close_delay_seconds","max_active_windows","max_active_keys","writer_queue_records","writer_queue_bytes","output","windows_output","duration","warmup","report_interval","delivery_enabled","victoriametrics_url","spool_directory","spool_max_bytes","spool_max_files","delivery_queue_records","delivery_queue_bytes","delivery_batch_records","delivery_batch_bytes","delivery_http_timeout_ms","delivery_retry_initial_ms","delivery_retry_max_ms","delivery_shutdown_timeout_ms","archive_state_directory","archive_state_max_bytes","archive_queue_bytes","archive_queue_minutes","archive_max_keys","archive_outbox_rows"};
         for(const auto& [k,v]:values)if(!allowed.contains(k)){at=v.second;throw std::runtime_error("Unknown parameter: "+k);}
         auto get=[&](const std::string& key)->std::string {auto it=values.find(key);if(it==values.end()){at=ln+1;throw std::runtime_error("Missing parameter: "+key);}at=it->second.second;return it->second.first;};
         auto scalar=[&](const std::string& key,uint64_t def,uint64_t lo,uint64_t hi){return values.contains(key)?number(get(key),lo,hi):def;};
@@ -145,6 +162,38 @@ AppConfig read_app_config(std::istream& input) {
         c.delivery.retry_initial_ms=scalar("delivery_retry_initial_ms",1000,10,3600000);
         c.delivery.retry_max_ms=scalar("delivery_retry_max_ms",60000,c.delivery.retry_initial_ms,3600000);
         c.delivery.shutdown_timeout_ms=scalar("delivery_shutdown_timeout_ms",10000,10,120000);
+        if(values.contains("archive_state_directory"))c.archive_state_directory=get("archive_state_directory");
+        if(c.archive_state_directory.empty()||c.archive_state_directory.front()!='/')throw std::runtime_error("archive_state_directory must be absolute");
+        c.archive_state_max_bytes=scalar("archive_state_max_bytes",1073741824,16777216,1ULL<<40);
+        c.archive_queue_bytes=scalar("archive_queue_bytes",67108864,1048576,268435456);
+        c.archive_queue_minutes=scalar("archive_queue_minutes",8,1,64);
+        c.archive_max_keys=scalar("archive_max_keys",1000000,1,4000000);
+        c.archive_outbox_rows=scalar("archive_outbox_rows",1000000,1,4000000);
+        std::set<std::string> endpoints;
+        for(auto& [archive,params]:sections) {
+            for(const auto& [key,v]:params)if(key!="url"&&key!="interval_seconds"&&key!="retention_days") {
+                at=v.second;throw std::runtime_error("Unknown archive parameter: "+key);
+            }
+            auto parameter=[&](const std::string& key) {
+                auto it=params.find(key);at=it==params.end()?archive.line:it->second.second;
+                if(it==params.end())throw std::runtime_error("Missing archive parameter "+key+" in "+archive.name);
+                return it->second.first;
+            };
+            archive.url=parameter("url");
+            const std::string prefix="http://127.0.0.1:";
+            if(!archive.url.starts_with(prefix))throw std::runtime_error("Archive URL must be local http://127.0.0.1:PORT");
+            auto port=number(archive.url.substr(prefix.size()),1,65535);
+            archive.url=prefix+std::to_string(port);
+            if(!endpoints.insert(archive.url).second)throw std::runtime_error("Archives must have distinct endpoints; resolutions must not share a database");
+            archive.interval_seconds=number(parameter("interval_seconds"),60,86400);
+            if(archive.interval_seconds%60)throw std::runtime_error("Archive interval must be a multiple of 60 seconds, at most 86400");
+            archive.retention_days=number(parameter("retention_days"),1,36500);
+            c.archives.push_back(std::move(archive));
+        }
+        if(!c.archives.empty()) {
+            const auto archive_count=c.archives.size();
+            if(c.archive_state_max_bytes/(archive_count+1)<1048576||c.archive_queue_bytes/archive_count<65536||c.delivery.spool_bytes/archive_count<1024||c.delivery.spool_files<archive_count||c.delivery.queue_bytes/archive_count<c.delivery.batch_bytes||c.delivery.queue_records/archive_count<c.delivery.batch_records||c.archive_max_keys<archive_count||c.archive_outbox_rows<archive_count)throw std::runtime_error("Archive aggregate budgets are insufficient for configured archive count");
+        }
         return c;
     }catch(const std::exception& e){throw std::runtime_error("Config line "+std::to_string(at)+": "+e.what());}
 }

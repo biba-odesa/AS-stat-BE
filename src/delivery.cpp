@@ -14,10 +14,10 @@
 extern char** environ;
 namespace asstats {
 std::string import_json(const WindowRow& r) {
-    if(r.start%60||r.end!=r.start+60||r.start>UINT64_MAX/1000||
+    if(r.start%60||r.end<=r.start||(r.end-r.start)%60||(r.end-r.start)>86400||r.start>UINT64_MAX/1000||
        (r.key.ip_version!=4&&r.key.ip_version!=6)||r.key.direction>1||r.key.link_id.empty()||
        r.key.link_id.size()>64||r.key.link_id.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")!=std::string::npos)
-        throw std::runtime_error("Invalid delivery minute row");
+        throw std::runtime_error("Invalid delivery interval row");
     return "{\"metric\":{\"__name__\":\"asstat_traffic_bytes\",\"link_id\":\""+r.key.link_id+
         "\",\"asn\":\""+std::to_string(r.key.asn)+"\",\"direction\":\""+(r.key.direction?"out":"in")+
         "\",\"ip_version\":\""+std::to_string(r.key.ip_version)+"\"},\"values\":["+r.bytes.str()+
@@ -29,7 +29,8 @@ Delivery::Delivery(DeliveryConfig c):config_(std::move(c)) {
     const auto exe=std::filesystem::read_symlink("/proc/self/exe").parent_path()/"nf9-delivery-worker";
     std::vector<std::string> args={exe.string(),config_.directory,config_.url,std::to_string(config_.spool_bytes),
         std::to_string(config_.spool_files),std::to_string(config_.batch_bytes),std::to_string(config_.http_timeout_ms),
-        std::to_string(config_.retry_initial_ms),std::to_string(config_.retry_max_ms)};
+        std::to_string(config_.retry_initial_ms),std::to_string(config_.retry_max_ms),std::to_string(config_.retention_seconds)};
+    std::string children;for(const auto& name:config_.permitted_child_directories){if(!children.empty())children+=',';children+=name;}args.push_back(children);
     std::vector<char*> argv;for(auto& a:args)argv.push_back(a.data());argv.push_back(nullptr);
     posix_spawn_file_actions_t actions;posix_spawn_file_actions_init(&actions);
     posix_spawn_file_actions_adddup2(&actions,pair[1],3);
@@ -59,11 +60,37 @@ bool Delivery::submit(const WindowRow& r) {
     if(closing_||done_||queue_.size()+inflight_>=config_.queue_records||charge>config_.queue_bytes-bytes_) {
         ++lost_;failed_=true;return false;
     }
-    bytes_+=charge;queue_.push_back({std::move(text),r.start});++accepted_;
+    bytes_+=charge;queue_.push_back({std::move(text),r.start,{}});++accepted_;
+    peak_bytes_=std::max(peak_bytes_,bytes_);peak_records_=std::max<uint64_t>(peak_records_,queue_.size()+inflight_);cv_.notify_one();return true;
+}
+bool Delivery::submit_durable(const std::vector<WindowRow>& rows,std::function<void(bool)> completion) {
+    if(rows.empty()||!completion)throw std::invalid_argument("Empty durable delivery batch/callback");
+    std::vector<Item> items;size_t charge=0;
+    auto receipt=std::make_shared<Receipt>();receipt->remaining=rows.size();receipt->completion=std::move(completion);
+    for(const auto& r:rows) {
+        if(r.partial||r.end-r.start!=config_.interval_seconds||r.start%config_.interval_seconds)throw std::runtime_error("Invalid durable archive interval");
+        auto text=import_json(r);
+        if(text.size()>config_.batch_bytes)throw std::runtime_error("Archive row exceeds HTTP batch size");
+        charge+=text.capacity()+sizeof(Item)+64;items.push_back({std::move(text),r.start,receipt});
+    }
+    std::lock_guard lock(mutex_);
+    if(closing_||done_||rows.size()>config_.queue_records-std::min<uint64_t>(config_.queue_records,queue_.size()+inflight_)||charge>config_.queue_bytes-bytes_)return false;
+    bytes_+=charge;for(auto& item:items)queue_.push_back(std::move(item));accepted_+=rows.size();
     peak_bytes_=std::max(peak_bytes_,bytes_);peak_records_=std::max<uint64_t>(peak_records_,queue_.size()+inflight_);cv_.notify_one();return true;
 }
 void Delivery::run() {
-    uint64_t inflight=0;bool deadline_hit=false;
+    uint64_t inflight=0,saved_rows=0;bool deadline_hit=false;
+    std::vector<std::shared_ptr<Receipt>> receipts;
+    auto complete=[&](bool success) {
+        for(auto& r:receipts)if(r) {
+            r->failed|=!success;
+            if(--r->remaining==0) {
+                try {r->completion(!r->failed);}
+                catch(...) {std::lock_guard lock(mutex_);failed_=true;}
+            }
+        }
+        receipts.clear();
+    };
     try {
         for(;;) {
             DeliveryRequest request;std::string body;size_t charge=0;
@@ -77,7 +104,7 @@ void Delivery::run() {
                     if(body.size()+item.text.size()>config_.batch_bytes)break;
                     if(!request.rows)request.first=item.timestamp;
                     request.first=std::min(request.first,item.timestamp);request.last=std::max(request.last,item.timestamp);
-                    body+=item.text;charge+=item.text.capacity()+sizeof(Item)+64;queue_.pop_front();++request.rows;
+                    body+=item.text;charge+=item.text.capacity()+sizeof(Item)+64;receipts.push_back(item.receipt);queue_.pop_front();++request.rows;
                 }
                 if(!queue_.empty()&&!request.rows)throw std::runtime_error("delivery row exceeds batch limit");
                 request.stop=closing_&&queue_.empty();
@@ -100,11 +127,14 @@ void Delivery::run() {
                 std::lock_guard lock(mutex_);bytes_-=charge;inflight=0;inflight_=0;worker_stats_=delivery_reply_json(reply);
                 if(reply.error[0]||reply.disk_errors||reply.lost_rows||reply.corrupt_files||reply.unfinished_files||reply.permanent_errors||reply.expired_batches)failed_=true;
             }
+            const bool durable=reply.saved_rows>=saved_rows&&reply.saved_rows-saved_rows==request.rows;
+            saved_rows=reply.saved_rows;complete(durable);
             if(reply.error[0])throw std::runtime_error("delivery worker failed");
             if(request.stop&&reply.pending_batches==0)break;
             // Pending permanent/expired batches remain on disk; shutdown is bounded by the parent deadline.
         }
-    }catch(...){std::lock_guard lock(mutex_);if(inflight||!queue_.empty()||!closing_||!deadline_hit)failed_=true;unconfirmed_+=inflight;inflight_=0;lost_+=queue_.size();queue_.clear();bytes_=0;}
+    }catch(...){std::lock_guard lock(mutex_);if(inflight||!queue_.empty()||!closing_||!deadline_hit)failed_=true;unconfirmed_+=inflight;inflight_=0;lost_+=queue_.size();for(auto& item:queue_)receipts.push_back(item.receipt);queue_.clear();bytes_=0;}
+    complete(false);
     close(fd_);fd_=-1;
     // Never wait indefinitely for a child blocked inside disk I/O.
     int status=0;pid_t result=waitpid(pid_,&status,WNOHANG);

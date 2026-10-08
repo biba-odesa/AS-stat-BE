@@ -21,3 +21,15 @@ __pycache__/
 /pilot-state/
 *final*.json
 CMakeUserPresets.json
+
+# Operational archive data and migration workspaces
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+spool/
+state/
+reference/
+backups/
+config/asstat.conf
+pilot-state/

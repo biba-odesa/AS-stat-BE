@@ -2,6 +2,8 @@
 #include "byte_count.hpp"
 #include "record.hpp"
 #include <deque>
+#include <array>
+#include <atomic>
 #include <functional>
 #include <istream>
 #include <map>
@@ -48,11 +50,14 @@ struct AccountingStats {
 };
 // A closed-window sink must return promptly. False means a failed verification, never silent loss.
 using WindowSink=std::function<bool(const WindowRow&)>;
+// One global minute, including an empty minute, crosses this boundary atomically.
+using MinuteSink=std::function<bool(uint64_t,bool,const std::vector<WindowRow>&)>;
 class MinuteAggregator {
 public:
-    MinuteAggregator(AggregationConfig,KnownLinks,uint64_t coverage_start_ns,WindowSink);
+    MinuteAggregator(AggregationConfig,KnownLinks,uint64_t coverage_start_ns,WindowSink,MinuteSink={});
     void add(const FlowRecord&,uint64_t processing_ns);
     void options(const OptionsRecord&);
+    void incomplete_minute(uint64_t received_ns);
     void tick(uint64_t now_ns);
     void stop_receiving(uint64_t coverage_end_ns);
     void finish(uint64_t coverage_end_ns);
@@ -64,7 +69,11 @@ private:
     KnownLinks links_;
     uint64_t start_ns_,stop_ns_{},watermark_ns_{};
     bool finished_{};
+    std::array<std::atomic<uint64_t>,128> incomplete_minutes_{};
     WindowSink sink_;
+    MinuteSink minute_sink_;
+    uint64_t next_emit_minute_{};
+    void emit_empty(uint64_t);
     AccountingStats stats_;
     std::map<uint64_t,Values> windows_;
     void close_due(uint64_t);

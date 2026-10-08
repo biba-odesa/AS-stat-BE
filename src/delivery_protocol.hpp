@@ -12,6 +12,7 @@ struct DeliveryReply {
 #define FIELD(n) uint64_t n{};
  DELIVERY_FIELDS(FIELD)
 #undef FIELD
+ uint64_t retention_seconds=604800;
  char error[192]{};
 };
 inline std::string delivery_reply_json(const DeliveryReply& r) {
@@ -20,6 +21,6 @@ inline std::string delivery_reply_json(const DeliveryReply& r) {
     DELIVERY_FIELDS(FIELD)
 #undef FIELD
     const auto now=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
-    out+="\"oldest_age_seconds\":"+std::to_string(r.oldest_timestamp&&now>r.oldest_timestamp?now-r.oldest_timestamp:0)+",\"retention_seconds\":604800}";return out;
+    out+="\"oldest_age_seconds\":"+std::to_string(r.oldest_timestamp&&now>r.oldest_timestamp?now-r.oldest_timestamp:0)+",\"retention_seconds\":"+std::to_string(r.retention_seconds)+"}";return out;
 }
 }

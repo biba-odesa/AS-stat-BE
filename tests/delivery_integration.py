@@ -66,6 +66,20 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(len(list(self.path.glob('*.ready'))), 3)
         self.assertFalse(self.server.bodies)
 
+    def test_archive_retention_is_configurable(self):
+        code, stats = self.run_driver('extended_retention')
+        self.assertEqual(code, 0)
+        self.assertEqual(stats['spool']['retention_seconds'], 31 * 86400)
+        self.assertEqual(stats['spool']['expired_batches'], 0)
+        self.assertEqual(stats['spool']['sent_rows'], 6)
+
+    def test_short_retention_keeps_expired_batches(self):
+        code, stats = self.run_driver('short_retention')
+        self.assertNotEqual(code, 0)
+        self.assertEqual(stats['spool']['retention_seconds'], 86400)
+        self.assertEqual(stats['spool']['expired_batches'], 3)
+        self.assertFalse(self.server.bodies)
+
     def test_file_count_limit(self):
         self.server.mode = 'unavailable'
         code, stats = self.run_driver('files')
@@ -165,6 +179,20 @@ class DeliveryTests(unittest.TestCase):
         self.assertGreater(stats['spool']['overflow_batches'], 0)
         self.assertTrue(list(self.path.glob('*.ready')))
         self.assertLessEqual(stats['spool']['pending_bytes'], 1024)
+
+    def test_durable_coarse_publication(self):
+        code, stats = self.run_driver('durable')
+        self.assertEqual(code, 0)
+        self.assertEqual(stats['spool']['saved_rows'], 6)
+        self.assertEqual(stats['spool']['sent_rows'], 6)
+
+    def test_durable_publication_does_not_require_http_success(self):
+        self.server.mode = 'unavailable'
+        code, stats = self.run_driver('durable_offline')
+        self.assertEqual(code, 0)
+        self.assertEqual(stats['spool']['saved_rows'], 6)
+        self.assertEqual(stats['spool']['pending_batches'], 3)
+        self.assertTrue(list(self.path.glob('*.ready')))
 
     def test_disk_error(self):
         code, stats = self.run_driver('disk')

@@ -10,13 +10,13 @@ Template cache identity includes configured source, exporter IP, Source ID and t
 
 Receive queue count and byte limits apply per source, with a shared configuration budget; overflow drops new datagrams. `socket_receive_buffer_bytes=0` keeps the kernel default; see [UDP receive buffer](#udp-receive-buffer) for requests, kernel limits and verification. Kernel drops, receive-queue drops and unknown templates are distinct diagnostics.
 
-`close_delay_seconds`, `max_active_windows`, `max_active_keys` bound global aggregation. `writer_queue_records/bytes` bound optional JSONL output. `windows_output=none` disables detailed JSONL while delivery=true keeps aggregation enabled. `duration=0` runs until signal. `warmup` affects diagnostics only; `report_interval` controls stderr summaries. Diagnostic output is bounded and may skip summaries under pressure.
+`close_delay_seconds`, `max_active_windows`, `max_active_keys` bound global aggregation. `writer_queue_records/bytes` bound optional JSONL output. `windows_output=none` disables detailed JSONL while delivery_enabled=true keeps aggregation enabled. `duration=0` runs until signal. `warmup` affects diagnostics only; `report_interval` controls stderr summaries. Diagnostic output is bounded and may skip summaries under pressure.
 
 `output` and non-none `windows_output` must be new files; existing targets are not overwritten. The provided launcher creates a unique report directory per start and overrides --output. It retains at most 32 run directories, which limits count, not a strict byte quota. Operational logs should also have a bounded journald policy.
 
 Delivery keys in the example configure URL, spool path, spool byte/file limits, RAM queue count/bytes, batch count/bytes, HTTP timeout, capped exponential retry delays and total shutdown budget. Only local `http://127.0.0.1:PORT` is supported; HTTP proxy is bypassed. Spool must be receiver-owned and not group/world writable. Keep it separate from VM storage. The public copy rejects the documented default /var/lib/victoriametrics storage path; this is not a generic detector of all possible VM data directories. Do not use another VM storage location as spool.
 
-The sample limits are 1GiB/8192 spool files, 512 records/128KiB per HTTP batch, 3s HTTP timeout, retry 1–60s and 10s delivery shutdown. Retention expiry uses the existing seven-day delivery policy; old timestamps are not moved forward. Corrupt/unfinished/expired/permanent-error files consume spool space and need deliberate operator handling. Do not delete unconfirmed batches automatically. Reducing the batch limit below existing batch sizes can prevent recovery and requires inspection.
+The sample limits are 1GiB/8192 spool files, 512 records/128KiB per HTTP batch, 3s HTTP timeout, retry 1–60s and 10s delivery shutdown. With archive sections, retention expiry uses each archive retention_days; old timestamps are not moved forward. Corrupt/unfinished/expired/permanent-error files consume spool space and need deliberate operator handling. Do not delete unconfirmed batches automatically. Reducing the batch limit below existing batch sizes can prevent recovery and requires inspection.
 
 CLI overrides supported: --output, --windows-output, --duration, --warmup, --report-interval. Offline decoder nf9-replay is independent of full config; nf9-aggregate-replay accepts --config, a selected --port and a new output JSONL filename. Replay does not implicitly deliver to VM.
 
@@ -43,3 +43,24 @@ sudo /usr/sbin/sysctl -w net.core.rmem_max=1048576
 ```
 
 Persist a deliberately chosen cap in a dedicated /etc/sysctl.d file only if needed. Changing the cap alone does not resize existing sockets: the application request must be applied when sockets are recreated. Plan any restart separately, then verify the actual result and drops. AS-stat-BE applies the explicitly configured per-socket request; it does not change host-wide sysctl settings.
+
+
+## Archive sections
+
+Global settings must precede `[archive NAME]` sections. See the complete checked [example](../config/asstat.conf.example). Each section requires exactly `url`, `interval_seconds`, and `retention_days`. Names must start with an ASCII letter/digit, contain only ASCII letters, digits, underscores or hyphens, and be at most 32 characters. At most 16 archives are allowed. Intervals are 60–86400 seconds, divisible by 60; retention is 1–36500 days. URLs are distinct `http://127.0.0.1:PORT` endpoints; do not mix resolutions in a database. Unknown/repeated keys or sections fail. Fully commented sections are inactive.
+
+| Example archive | Interval | Delivery age | Example VM retention | Port |
+| --- | ---: | ---: | --- | ---: |
+| minute | 60 s | 1 day | 1d | 8428 |
+| week | 300 s | 7 days | 7d | 8429 |
+| month | 1800 s | 31 days | 31d | 8430 |
+| year | 7200 s | 370 days | 370d | 8431 |
+| four_years (commented) | 14400 s | 1461 days | 1461d | 8432 |
+
+These names are examples, not special modes. `interval_seconds` controls actual temporal summation. `retention_days` controls eligible delivery age, not VM deletion. Runtime VM retention is discovered asynchronously: a longer value is allowed, a shorter value blocks that archive's delivery with diagnostics, and temporary unavailability does not prevent collection. Configure VM retention at least as long as delivery age. Do not automatically shorten an existing minute database: historical availability and bootstrap needs must be assessed separately.
+
+`archive_state_directory` contains separate receiver-owned directories and SQLite files per archive. `archive_state_max_bytes` bounds database pages, divided across N archives plus one reference share; allow additional filesystem space for rollback journals, backups and spool. It is not an overall disk quota. `archive_queue_bytes` is divided across archives; `archive_queue_minutes` bounds each channel's count. `archive_max_keys` and `archive_outbox_rows` are divided across archives. Global spool byte/file and delivery queue budgets are also divided. The example uses 2 GiB state, 64 MiB archive queues, eight queued minutes/channel and one million total keys/outbox rows. These are bounded example budgets, not a sizing promise for every load.
+
+Saved URL/interval fingerprints cannot change. Registry validation inspects existing state read-only; config changes require restart. Increasing archive count reduces per-archive shares: check existing page counts, spool batches and memory budgets before adding sections. A database whose allocated page count exceeds its new share may require a larger justified aggregate budget; do not delete or reset state to bypass the check. See [archive administration](archives.md) for initialization, bootstrap and migration.
+
+During catch-up, a full outbox leaves the next immutable minute in durable inbox. `outbox_backpressure` counts observations, not lost minutes. Storage errors, rejected input, queue loss, expiry, corrupt batches, HTTP errors and source drops are distinct diagnostics. Detailed window JSONL is optional; `windows_output=none` keeps aggregation and delivery enabled. Partial/gap windows are not delivered as complete intervals.

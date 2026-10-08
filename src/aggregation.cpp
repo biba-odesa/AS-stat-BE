@@ -10,13 +10,18 @@ std::string window_json(const WindowRow& r) {
       <<"\",\"asn\":"<<r.key.asn<<",\"direction\":\""<<(r.key.direction?"out":"in")<<"\",\"ip_version\":"<<unsigned(r.key.ip_version)
       <<",\"bytes\":\""<<r.bytes.str()<<"\",\"partial\":"<<(r.partial?"true":"false")<<"}\n";return out.str();
 }
-MinuteAggregator::MinuteAggregator(AggregationConfig config,KnownLinks links,uint64_t start,WindowSink sink)
-    :config_(std::move(config)),links_(std::move(links)),start_ns_(start),sink_(std::move(sink)) {
+MinuteAggregator::MinuteAggregator(AggregationConfig config,KnownLinks links,uint64_t start,WindowSink sink,MinuteSink minute_sink)
+    :config_(std::move(config)),links_(std::move(links)),start_ns_(start),sink_(std::move(sink)),minute_sink_(std::move(minute_sink)),next_emit_minute_(start/ns/60*60) {
     if(!config_.max_active_windows||!config_.max_active_keys||config_.close_delay_seconds>3600||!sink_) throw std::invalid_argument("Invalid aggregator limits/sink");
 }
 void MinuteAggregator::emit(std::map<uint64_t,Values>::iterator it) {
     const uint64_t start=it->first,end=start+60;
-    const bool partial=UInt128(start)*ns<start_ns_||(stop_ns_&&UInt128(end)*ns>stop_ns_);
+    const bool partial=UInt128(start)*ns<start_ns_||(stop_ns_&&UInt128(end)*ns>stop_ns_)||(minute_sink_&&incomplete_minutes_[start/60%128].load()==start/60+1);
+    if(minute_sink_) {
+        std::vector<WindowRow> batch;batch.reserve(it->second.size());
+        for(const auto& [key,value]:it->second)batch.push_back({start,end,key,value,partial});
+        if(!minute_sink_(start,partial,batch)){++stats_.output_rejections;stats_.failed=true;}
+    }
     for(const auto& [key,value]:it->second) {
         if(!sink_({start,end,key,value,partial})) {++stats_.output_rejections;stats_.failed=true;}
         else ++stats_.rows;
@@ -26,8 +31,21 @@ void MinuteAggregator::emit(std::map<uint64_t,Values>::iterator it) {
     if(stats_.recent_windows.size()>64)stats_.recent_windows.pop_front();
     stats_.active_keys-=it->second.size();windows_.erase(it);stats_.active_windows=windows_.size();
 }
+void MinuteAggregator::emit_empty(uint64_t start) {
+    const bool partial=UInt128(start)*ns<start_ns_||(stop_ns_&&UInt128(start+60)*ns>stop_ns_)||incomplete_minutes_[start/60%128].load()==start/60+1;
+    if(!minute_sink_(start,partial,{})){++stats_.output_rejections;stats_.failed=true;}
+}
 void MinuteAggregator::close_due(uint64_t now) {
     watermark_ns_=std::max(watermark_ns_,now);
+    if(minute_sink_) {
+        // Bound work after a large wall-clock jump. Later ticks resume the cursor.
+        for(unsigned n=0;n<256&&watermark_ns_/ns>=next_emit_minute_+60+config_.close_delay_seconds;++n) {
+            auto it=windows_.find(next_emit_minute_);
+            if(it==windows_.end())emit_empty(next_emit_minute_);else emit(it);
+            next_emit_minute_+=60;
+        }
+        return;
+    }
     while(!windows_.empty()) {
         auto it=windows_.begin();
         if(watermark_ns_/ns<it->first+60+config_.close_delay_seconds) break;
@@ -38,6 +56,13 @@ void MinuteAggregator::tick(uint64_t now) {std::lock_guard lock(mutex_);close_du
 void MinuteAggregator::stop_receiving(uint64_t end) {std::lock_guard lock(mutex_);stop_ns_=end;}
 void MinuteAggregator::finish(uint64_t end) {
     std::lock_guard lock(mutex_);stop_ns_=end;
+    if(minute_sink_) {
+        while(UInt128(next_emit_minute_)*ns<end) {
+            auto it=windows_.find(next_emit_minute_);
+            if(it==windows_.end())emit_empty(next_emit_minute_);else emit(it);
+            next_emit_minute_+=60;
+        }
+    }
     while(!windows_.empty()) emit(windows_.begin());
     finished_=true;
 }
@@ -79,7 +104,7 @@ void MinuteAggregator::add(const FlowRecord& r,uint64_t now) {
             if((new_window&&windows_.size()>=config_.max_active_windows)||(new_key&&stats_.active_keys>=config_.max_active_keys)) {
                 if(new_window&&windows_.size()>=config_.max_active_windows)++stats_.window_limit_sides;
                 if(new_key&&stats_.active_keys>=config_.max_active_keys)++stats_.key_limit_sides;
-                ++stats_.limit_sides;stats_.limit_bytes.add(bytes);stats_.failed=true;continue;
+                ++stats_.limit_sides;stats_.limit_bytes.add(bytes);stats_.failed=true;incomplete_minute(r.identity.source.received_ns);continue;
             }
             auto& values=windows_[window];values[key].add(bytes);
             stats_.accounted_bytes.add(bytes);++stats_.accounted_sides;
@@ -87,7 +112,12 @@ void MinuteAggregator::add(const FlowRecord& r,uint64_t now) {
             stats_.active_windows=windows_.size();stats_.peak_keys=std::max(stats_.peak_keys,stats_.active_keys);
             stats_.peak_windows=std::max(stats_.peak_windows,stats_.active_windows);
         }
-    }catch(const std::overflow_error&){++stats_.overflow_errors;stats_.failed=true;throw;}
+    }catch(const std::overflow_error&){++stats_.overflow_errors;stats_.failed=true;incomplete_minute(r.identity.source.received_ns);throw;}
+}
+void MinuteAggregator::incomplete_minute(uint64_t received_ns) {
+    // No lock or disk operation on the receive path. A fixed ring bounds memory.
+    const auto minute=received_ns/ns/60+1;auto& slot=incomplete_minutes_[(minute-1)%128];
+    auto prior=slot.load();while(prior<minute&&!slot.compare_exchange_weak(prior,minute)){}
 }
 void MinuteAggregator::options(const OptionsRecord& r) {
     std::lock_guard lock(mutex_);

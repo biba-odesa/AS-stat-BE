@@ -1,4 +1,7 @@
 #include "asstats/app_config.hpp"
+#include "asstats/archive_manager.hpp"
+#include "asstats/archive_journal.hpp"
+#include <filesystem>
 #include "asstats/aggregation.hpp"
 #include "asstats/async_output.hpp"
 #include "asstats/decoder.hpp"
@@ -81,6 +84,7 @@ struct Source {
                             },[&](const OptionsRecord& r){if(aggregator)aggregator->options(r);});
                         } else decoder.expire_templates();
                         decoded.all=decoder.diagnostics();decoded.cache_entries=decoder.cache_size();
+                        if(have&&aggregator&&(decoded.all.unknown_template_flowsets>before.unknown_template_flowsets||decoded.all.malformed_datagrams>before.malformed_datagrams||decoded.all.malformed_data_flowsets>before.malformed_data_flowsets||decoded.all.wrong_version>before.wrong_version))aggregator->incomplete_minute(data.info.received_ns);
                         if(warm) add_difference(decoded.warm,decoded.all,before);
                     }
                     if(!have && queue.drained()) break;
@@ -102,13 +106,14 @@ struct Source {
             increment.socket_drops=static_cast<uint32_t>(*d.socket_drop_counter-last_socket_drop_counter);
             increment.socket_drop_samples=1;last_socket_drop_counter=*d.socket_drop_counter;
         }
+        if(aggregator&&(increment.socket_drops||increment.truncated))aggregator->incomplete_minute(d.info.received_ns);
         last_received_ns=d.info.received_ns;
         if(!config.allows(d.info.exporter)) increment.unexpected_exporters=1;
         else {
             last_allowed_received_ns=d.info.received_ns;
             if(!d.truncated) {
                 if(queue.push(d.info,payload)) increment.enqueued=1;
-                else increment.queue_drops=1;
+                else {increment.queue_drops=1;if(aggregator)aggregator->incomplete_minute(d.info.received_ns);}
             }
         }
 #define ADD(n) received.n+=increment.n; if(d.info.received_monotonic_ns>=boundary) warm_received.n+=increment.n;
@@ -160,7 +165,7 @@ void interfaces_json(std::ostream& out,const std::array<InterfaceStats,3>& group
 }
 std::string report(const std::vector<std::unique_ptr<Source>>& sources,uint64_t start,uint64_t reception_end,
                    uint64_t warm_seconds,const std::string& reason,bool final,
-                   MinuteAggregator* aggregator=nullptr, AsyncOutput* writer=nullptr, AsyncOutput* diagnostic=nullptr, Delivery* delivery=nullptr) {
+                   MinuteAggregator* aggregator=nullptr, AsyncOutput* writer=nullptr, AsyncOutput* diagnostic=nullptr, Delivery* delivery=nullptr, ArchiveManager* archives=nullptr) {
     const uint64_t now=monotonic_ns();
     const double elapsed=double((reception_end?reception_end:now)-start)/double(second);
     const double warm_elapsed=std::max(0.0,elapsed-double(warm_seconds));
@@ -209,6 +214,7 @@ std::string report(const std::vector<std::unique_ptr<Source>>& sources,uint64_t 
     if(writer)out<<",\"writer\":"<<output_stats_json(writer->stats());
     if(diagnostic)out<<",\"diagnostic_output\":"<<output_stats_json(diagnostic->stats());
     if(delivery)out<<",\"delivery\":"<<delivery->diagnostics();
+    if(archives)out<<",\"archives\":"<<archives->diagnostics();
     out<<"}\n";return out.str();
 }
 uint64_t number(const std::string& s,uint64_t max) {
@@ -253,28 +259,35 @@ int main(int argc,char** argv) {
         if(!interval)throw std::runtime_error("report interval must be positive");
         std::optional<AggregationConfig> accounting_config;
         if(windows_path!="none"||app.delivery.enabled)accounting_config=app.aggregation;
+        if(check&&!app.archives.empty()&&std::filesystem::exists(app.archive_state_directory))validate_archive_registry(app.archive_state_directory,app.archives);
         if(check) {std::cout<<"Valid sources: "<<configs.size()<<'\n';return 0;}
+
         sigset_t mask;sigemptyset(&mask);sigaddset(&mask,SIGINT);sigaddset(&mask,SIGTERM);
         if(pthread_sigmask(SIG_BLOCK,&mask,nullptr)!=0) throw std::runtime_error("Cannot block stop signals");
         diagnostic=std::make_unique<AsyncOutput>(STDERR_FILENO,8,512*1024,false);
         File signals;signals.fd=signalfd(-1,&mask,SFD_CLOEXEC|SFD_NONBLOCK);
         if(signals.fd<0) throw std::runtime_error("signalfd failed");
+        const uint64_t coverage_start=realtime_ns();
         std::vector<std::unique_ptr<Source>> sources;
         for(auto& c:configs) sources.push_back(std::make_unique<Source>(std::move(c)));
         AsyncOutput output(output_path,1,512*1024);
         std::unique_ptr<AsyncOutput> window_writer;
         if(windows_path!="none")window_writer=std::make_unique<AsyncOutput>(windows_path,accounting_config->writer_queue_records,accounting_config->writer_queue_bytes);
         std::unique_ptr<Delivery> delivery;
-        if(app.delivery.enabled)delivery=std::make_unique<Delivery>(app.delivery);
+        std::unique_ptr<ArchiveManager> archives;
+        if(app.delivery.enabled) {
+            if(app.archives.empty())delivery=std::make_unique<Delivery>(app.delivery);
+            else archives=std::make_unique<ArchiveManager>(app,config_path,coverage_start/second/60*60);
+        }
         const uint64_t start=monotonic_ns(),boundary=start+warmup*second;
         std::unique_ptr<MinuteAggregator> aggregator;
-        if(accounting_config)aggregator=std::make_unique<MinuteAggregator>(*accounting_config,std::move(*links),realtime_ns(),
+        if(accounting_config)aggregator=std::make_unique<MinuteAggregator>(*accounting_config,std::move(*links),coverage_start,
             [&](const WindowRow& row){
                 bool ok=true;
                 if(window_writer)ok=window_writer->submit(window_json(row));
                 if(delivery&&!delivery->submit(row))ok=false;
                 return ok;
-            });
+            },archives?MinuteSink([&](uint64_t minute,bool partial,const auto& rows){return archives->submit(minute,partial,rows);}):MinuteSink{});
         WorkerLifetime workers{sources};
         for(auto& s:sources) {s->aggregator=aggregator.get();s->start(boundary);}
         diagnostic->submit("{\"event\":\"ready\",\"sources\":"+std::to_string(sources.size())+"}\n");
@@ -286,7 +299,7 @@ int main(int argc,char** argv) {
                     if(aggregator)aggregator->tick(realtime_ns());
                     const auto now=monotonic_ns();
                     if(now>=next) {
-                        diagnostic->submit(report(sources,start,0,warmup,"running",false,aggregator.get(),window_writer.get(),diagnostic.get(),delivery.get()));
+                        diagnostic->submit(report(sources,start,0,warmup,"running",false,aggregator.get(),window_writer.get(),diagnostic.get(),delivery.get(),archives.get()));
                         next=now+interval*second;
                     }
                     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -339,11 +352,12 @@ int main(int argc,char** argv) {
         if(reporter_failed)failed=true;
         if(aggregator) {aggregator->finish(coverage_end);if(aggregator->stats().failed)failed=true;}
         if(delivery&&!delivery->finish())failed=true;
+        if(archives&&!archives->finish())failed=true;
         if(window_writer&&!window_writer->finish(std::chrono::seconds(5)))failed=true;
         // Diagnostics are lossy by design; a blocked sink cannot hold shutdown hostage.
         diagnostic->finish(std::chrono::milliseconds(200));
         if(failed) reason="error";
-        const auto final=report(sources,start,reception_end,warmup,reason,true,aggregator.get(),window_writer.get(),diagnostic.get(),delivery.get());
+        const auto final=report(sources,start,reception_end,warmup,reason,true,aggregator.get(),window_writer.get(),diagnostic.get(),delivery.get(),archives.get());
         if(!output.submit(final)||!output.finish(std::chrono::seconds(2)))failed=true;
         return failed?1:0;
     } catch(const std::exception& e) {
