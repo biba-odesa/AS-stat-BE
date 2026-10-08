@@ -1,0 +1,18 @@
+[Unit]
+Description=AS-stat-BE bounded minute resource monitoring
+After=asstat-be.service
+
+[Service]
+Type=oneshot
+User=asstat
+Group=asstat
+WorkingDirectory=/opt/as-stat-be
+Environment=ASSTAT_ROOT=/opt/as-stat-be
+Environment=ASSTAT_CONFIG=/etc/as-stat-be/asstat.conf
+Environment=ASSTAT_MONITOR_DIRECTORY=/var/lib/as-stat-be/monitor
+ExecCondition=/usr/bin/systemctl is-active --quiet asstat-be.service
+ExecStart=/usr/bin/python3 /opt/as-stat-be/bin/service_runtime.py sample
+TimeoutStartSec=55
+UMask=0027
+LogRateLimitIntervalSec=60
+LogRateLimitBurst=5

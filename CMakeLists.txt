@@ -95,3 +95,6 @@ set_tests_properties(archive-migration PROPERTIES TIMEOUT 70)
 add_test(NAME archive-wait COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/archive_wait_tests.py)
 
 add_test(NAME archive-recovery-tools COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/archive_recovery_tests.py)
+
+add_test(NAME service-runtime COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_service_runtime.py)
+set_tests_properties(service-runtime PROPERTIES TIMEOUT 45)

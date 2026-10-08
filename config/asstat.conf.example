@@ -45,7 +45,7 @@ delivery_shutdown_timeout_ms = 10000
 # Optional per-socket request; 0 preserves kernel default.
 socket_receive_buffer_bytes = 0
 
-# Independent interval archives; initialize state explicitly before first startup.
+# Independent interval archives; the permanent launcher initializes empty state at the current minute.
 # Total budgets are divided between configured archives; state reserves one share for migration reference.
 archive_state_directory = /var/lib/as-stat-be/archives
 archive_state_max_bytes = 2147483648

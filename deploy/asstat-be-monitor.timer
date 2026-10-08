@@ -1,0 +1,11 @@
+[Unit]
+Description=AS-stat-BE minute resource monitoring
+PartOf=asstat-be.service
+
+[Timer]
+OnCalendar=*-*-* *:*:00 UTC
+AccuracySec=1s
+Unit=asstat-be-monitor.service
+
+[Install]
+WantedBy=timers.target

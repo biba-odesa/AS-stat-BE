@@ -33,3 +33,5 @@ reference/
 backups/
 config/asstat.conf
 pilot-state/
+
+/runtime-state/

@@ -1,0 +1,29 @@
+[Unit]
+Description=AS-stat-BE permanent NetFlow collector and archives
+Wants=network-online.target asstat-be-monitor.timer
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=asstat
+Group=asstat
+WorkingDirectory=/opt/as-stat-be
+Environment=ASSTAT_ROOT=/opt/as-stat-be
+Environment=ASSTAT_BIN=/opt/as-stat-be/bin
+Environment=ASSTAT_CONFIG=/etc/as-stat-be/asstat.conf
+Environment=ASSTAT_MONITOR_DIRECTORY=/var/lib/as-stat-be/monitor
+ExecStart=/usr/bin/python3 /opt/as-stat-be/bin/service_runtime.py run
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=90
+CPUAccounting=yes
+MemoryAccounting=yes
+UMask=0027
+NoNewPrivileges=true
+LogRateLimitIntervalSec=60
+LogRateLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target

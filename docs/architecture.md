@@ -23,3 +23,7 @@ Startup/restart retains accumulated coarse windows and excludes known interrupti
 Each endpoint stores the same gauge `asstat_traffic_bytes` and labels link_id/asn/direction/ip_version. Values are byte sums for that endpoint's interval, timestamps its UTC start in milliseconds. Resolution is selected by endpoint, not an extra label. Do not combine endpoints as if they contained unique disjoint traffic. VM numeric representation cannot exactly preserve every uint128; independent checks compare actual raw stored values and report rounding rather than assuming integer precision.
 
 Diagnostics separate socket drops, channel losses, unknown templates, journal/stage errors, outbox backpressure, HTTP/disk errors, spool age/bytes/batches and expiry. No routine raw export runs every minute. Bounded snapshots may be skipped under diagnostic pressure. See [configuration](configuration.md), [installation](installation.md), [archive administration](archives.md) and [queries](queries.md).
+
+## Optional volatile deployment
+
+The permanent service can require a dedicated tmpfs for SQLite state and per-archive spool, with automatic initialization only after a genuinely empty boot. Existing state survives ordinary service restart; reboot loses unfinished windows and pending batches. This changes disk-backed durability guarantees. SQLite FULL and fsync remain enabled. See [deployment and loss boundaries](tmpfs.md).
